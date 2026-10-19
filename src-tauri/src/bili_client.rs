@@ -40,6 +40,9 @@ use crate::{
 const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36";
 const REFERRER: &str = "https://www.bilibili.com/";
 
+// 哔哩哔哩风控需要的设备标识(buvid3/buvid4)，获取失败时为空，此时cookie只包含SESSDATA
+static BUVID_COOKIE: RwLock<String> = RwLock::new(String::new());
+
 pub struct BiliClient {
     pub app: AppHandle,
     pub api_client: RwLock<ClientWithMiddleware>,
@@ -58,6 +61,8 @@ impl BiliClient {
         let content_length_client = create_content_length_client(&app);
         let content_length_client = RwLock::new(content_length_client);
 
+        spawn_fetch_buvid(&app);
+
         Self {
             app,
             api_client,
@@ -73,6 +78,7 @@ impl BiliClient {
         *self.media_client.write() = media_client;
         let content_length_client = create_content_length_client(&self.app);
         *self.content_length_client.write() = content_length_client;
+        spawn_fetch_buvid(&self.app);
     }
 
     #[instrument(level = "error", skip_all)]
@@ -1097,8 +1103,47 @@ impl BiliClient {
 
     pub fn get_cookie(&self) -> String {
         let sessdata = self.app.get_config().read().sessdata.clone();
-        format!("SESSDATA={}", sessdata.trim_end_matches(';'))
+        let cookie = format!("SESSDATA={}", sessdata.trim_end_matches(';'));
+        let buvid = BUVID_COOKIE.read();
+        if buvid.is_empty() {
+            cookie
+        } else {
+            format!("{cookie}; {buvid}")
+        }
     }
+}
+
+// 如果还没有buvid，就在后台获取一次，失败只记录日志，不影响其他请求
+fn spawn_fetch_buvid(app: &AppHandle) {
+    if !BUVID_COOKIE.read().is_empty() {
+        return;
+    }
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let result: eyre::Result<String> = async {
+            let client = create_api_client(&app);
+            let body = client
+                .get("https://api.bilibili.com/x/frontend/finger/spi")
+                .send()
+                .await?
+                .text()
+                .await?;
+            let value: serde_json::Value = serde_json::from_str(&body)
+                .wrap_err(format!("将body解析为json失败: {body}"))?;
+            let b3 = value["data"]["b_3"].as_str().ok_or_eyre("缺少b_3")?;
+            let b4 = value["data"]["b_4"].as_str().ok_or_eyre("缺少b_4")?;
+            Ok(format!("buvid3={b3}; buvid4={b4}"))
+        }
+        .await;
+        match result {
+            Ok(buvid) => *BUVID_COOKIE.write() = buvid,
+            Err(err) => {
+                let err_title = "获取buvid失败";
+                let message = err.to_message();
+                tracing::error!(err_title, message);
+            }
+        }
+    });
 }
 
 fn create_api_client(app: &AppHandle) -> ClientWithMiddleware {
@@ -1113,7 +1158,7 @@ fn create_api_client(app: &AppHandle) -> ClientWithMiddleware {
 
     let client = reqwest::ClientBuilder::new()
         .set_proxy(app, "api_client")
-        .timeout(Duration::from_secs(3))
+        .timeout(Duration::from_secs(15))
         .default_headers(headers)
         .build()
         .unwrap();
