@@ -204,7 +204,7 @@ impl BiliClient {
         let request = self
             .api_client
             .read()
-            .get("https://api.bilibili.com/x/web-interface/view")
+            .get("https://api.bilibili.com/x/web-interface/wbi/view")
             .query(&params)
             .header("cookie", self.get_cookie());
         let http_resp = request.send().await?;
@@ -1113,7 +1113,7 @@ fn create_api_client(app: &AppHandle) -> ClientWithMiddleware {
 
     let client = reqwest::ClientBuilder::new()
         .set_proxy(app, "api_client")
-        .timeout(Duration::from_secs(3))
+        .timeout(Duration::from_secs(15))
         .default_headers(headers)
         .build()
         .unwrap();
